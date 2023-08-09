@@ -54,6 +54,8 @@ deps_/home/bitcraze/crazyflie-firmware/examples/demos/test/src/test.o := \
   /home/bitcraze/crazyflie-firmware/src/utils/interface/lighthouse/lighthouse_types.h \
   /home/bitcraze/crazyflie-firmware/src/modules/interface/crtp_commander_high_level.h \
   /home/bitcraze/crazyflie-firmware/src/modules/interface/math3d.h \
+  /home/bitcraze/crazyflie-firmware/examples/demos/test/src/MovedecisionMaker.h \
+  /home/bitcraze/crazyflie-firmware/examples/demos/test/src/CONSTS.h \
   /home/bitcraze/crazyflie-firmware/vendor/FreeRTOS/include/FreeRTOS.h \
   /home/bitcraze/crazyflie-firmware/src/config/FreeRTOSConfig.h \
     $(wildcard include/config/h.h) \

@@ -26,6 +26,7 @@
  * has to have the multiranger and the flowdeck version 2.
  */
 
+
 #include <string.h>
 #include <stdint.h>
 #include <stdbool.h>
@@ -35,6 +36,9 @@
 #include "app.h"
 #include "commander.h"
 #include "crtp_commander_high_level.h"
+
+#include "MovedecisionMaker.h"
+#include "CONSTS.h"
 
 #include "FreeRTOS.h"
 #include "task.h"
@@ -56,11 +60,10 @@
 #define DIST(a,b) (sqrtf(POW2(a)+POW2(b)))
 #define SIGN(a) ((a<0)?(-1):(1))
 
-#define HEIGHT 0.2f
+
 #define ACCEPTABLE_RADIUS_FROM_WAYPOINT 0.1f
-#define NUM_OF_WAYPOINTS 5
 #define MAX_TIME_BEFORE_OUT_OF_RANGE 1.5f
-#define MAX_NUM_OF_WAY_POINTS 10
+
 
 static P2PPacket p_reply;
 static const uint16_t unlockLow = 100;
@@ -68,7 +71,7 @@ static const uint16_t unlockHigh = 300;
 uint8_t currentWayPoint = 0;
 uint8_t currentRecievedWayPoint = 0;
 
-float timeOfLastMsg = 0.0f;
+
 #define MAX_DISTORTED_MSGS 5
 uint8_t numOfDistortedMsg = 0;
 
@@ -93,24 +96,27 @@ void setInitPos(float* initialPos){
 bool lostConnectionBefore = 0;
 bool FIRSTMsg = false;
 
-float wayPoints[NUM_OF_WAYPOINTS][3] = {{0,0,HEIGHT},
+float wayPoints[MAX_NUM_OF_WAY_POINTS][3] = {{0,0,HEIGHT},
                                         {0.4f,0.4f,HEIGHT},
                                         {0.4f,0.0f,HEIGHT},
                                         {0.8f,0,HEIGHT},
                                         {0.8f,0.4f,HEIGHT}};//global [x,y,z]
 
-float recievedWayPoints[MAX_NUM_OF_WAY_POINTS][3];
-int NumOfRecievedWayPoints = 0;
+float recievedWayPoints[3];
 
 typedef enum {
   ERROR,
   starting,
-  checkIfInRange,
   sayingPos
 } HighLevelMsg;
 
 
-
+uint8_t countDistortedMsg(float lastKnownPos[3], float posMsg[3], uint8_t numOfDistMsgs){
+  if (DIST(lastKnownPos[0]-posMsg[0], lastKnownPos[1]-posMsg[1]) > 1.0f){
+    return numOfDistortedMsg+1;
+  }
+  return 0;
+}
 
 void p2pcallbackHandler(P2PPacket *p)
 {
@@ -121,35 +127,17 @@ void p2pcallbackHandler(P2PPacket *p)
   float timeNow = usecTimestamp() / 1e6;
   DEBUG_PRINT("\ntime: %f, the id: %x\nthe rssi: %d\nthe port: %d\n data[0]: %x\n",(double)timeNow,id,rssi,port,data0);
 
-  if(numOfDistortedMsg >= MAX_DISTORTED_MSGS){
-    lostConnectionBefore = true;
-    return;
-  }
+
 
   if(data0 == (uint8_t)starting){
     DEBUG_PRINT("Other Drone Started Flying\n");
     FIRSTMsg = true;
-    timeOfLastMsg = usecTimestamp() / 1e6;
-    return;
   }
 
-  if(data0 == (uint8_t)checkIfInRange){
-    if(p->data[2] == (uint8_t)checkIfInRange){
-      DEBUG_PRINT("other drone is still in range\n");
-      FIRSTMsg = true;
-      timeOfLastMsg = usecTimestamp() / 1e6;
-      return;
-    }
-    DEBUG_PRINT("recieved incomlete range checker\n");
-    numOfDistortedMsg++;
-    return;
-  }
-
-  if(data0 == (uint8_t)sayingPos){
-    DEBUG_PRINT("I got the %d pos!\n", NumOfRecievedWayPoints+1);
+  else if(data0 == (uint8_t)sayingPos){
+    DEBUG_PRINT("I got the pos!\n");
     if(lostConnectionBefore == true) return;
-    numOfDistortedMsg = 0;
-    timeOfLastMsg = usecTimestamp() / 1e6;
+    
     float x;
     float y;
     float Height;
@@ -157,27 +145,25 @@ void p2pcallbackHandler(P2PPacket *p)
     memcpy(&y, &(p->data[6]), sizeof(float));
     memcpy(&Height, &(p->data[10]), sizeof(float));
     DEBUG_PRINT("X: %f, Y:%f, Z:%f\n",(double)x,(double)y,(double)Height);
-    recievedWayPoints[NumOfRecievedWayPoints][0] = x;
-    recievedWayPoints[NumOfRecievedWayPoints][1] = y;
-    recievedWayPoints[NumOfRecievedWayPoints][2] = Height;
-    NumOfRecievedWayPoints++;
-    return;
+    float posMsg[] = {x,y,Height};
+    numOfDistortedMsg = countDistortedMsg(recievedWayPoints,posMsg,numOfDistortedMsg);
+    if (numOfDistortedMsg == 0){
+      recievedWayPoints[0] = x;
+      recievedWayPoints[1] = y;
+      recievedWayPoints[2] = Height;
+    }
   }
-  numOfDistortedMsg++;
-  DEBUG_PRINT("non recognized packet!\n");
-  return;
+  else{
+    numOfDistortedMsg++;
+    DEBUG_PRINT("non recognized packet!\n");
+  }
+
+  if(numOfDistortedMsg >= MAX_DISTORTED_MSGS){
+    lostConnectionBefore = true;
+  }
 
 }
 
-void calculateVelToGoal(float currentX, float currentY, float goalX, float goalY, float* velX, float* velY){
-  float maxSpeed = 0.3;
-  float dy = goalY - currentY;
-  float dx = goalX - currentX;
-  
-  float dist = DIST(dx,dy);
-  (*velX) = maxSpeed*dx/dist;
-  (*velY) = maxSpeed*dy/dist;
-}
 
 /*
 float calculateYaw(float goalX, float goalY, float currX, float currY){
@@ -189,23 +175,7 @@ float calculateYaw(float goalX, float goalY, float currX, float currY){
 
 }
 */
-static void setHoverSetpoint(setpoint_t *setpoint, float vx, float vy, float z, float yawrate, bool relative)
-{
-  setpoint->mode.z = modeAbs;
-  setpoint->position.z = z;
 
-
-  setpoint->mode.yaw = modeAbs;
-  setpoint->attitudeRate.yaw = yawrate;
-
-
-  setpoint->mode.x = modeVelocity;
-  setpoint->mode.y = modeVelocity;
-  setpoint->velocity.x = vx;
-  setpoint->velocity.y = vy;
-
-  setpoint->velocity_body = relative;
-}
 
 void sendPacket(HighLevelMsg msg){
     
@@ -235,33 +205,23 @@ void sendLocPacket(float x, float y, float height){
     radiolinkSendP2PPacketBroadcast(&p_reply);
 }
 
-typedef enum {
-    idle,
-    GetToLastKnownPos,
-    lowUnlock,
-    unlocked,
-    moving,
-    hover,
-    end,
-} State;
 
 static State state = idle;
 
 void appMain()
 {
-  static setpoint_t setpoint;
 
   p2pRegisterCB(p2pcallbackHandler);
 
-  vTaskDelay(M2T(3000));
+  vTaskDelay(M2T(1000));
   setInitPos(initialPos);
 
   paramVarId_t idHighLevelComm = paramGetVarId("commander", "enHighLevel");
   logVarId_t idUp = logGetVarId("range", "up");
-  /*logVarId_t idLeft = logGetVarId("range", "left");
-  logVarId_t idRight = logGetVarId("range", "right");
+  //logVarId_t idLeft = logGetVarId("range", "left");
+  //logVarId_t idRight = logGetVarId("range", "right");
   logVarId_t idFront = logGetVarId("range", "front");
-  logVarId_t idBack = logGetVarId("range", "back");*/
+  //logVarId_t idBack = logGetVarId("range", "back");
   logVarId_t idX = logGetVarId("stateEstimate", "x");
   logVarId_t idY = logGetVarId("stateEstimate", "y");
   /*logVarId_t idYaw = logGetVarId("stabilizer", "yaw");*/
@@ -276,21 +236,21 @@ void appMain()
   float XEstimate = initialPos[0];
   float YEstimate = initialPos[1];
 
-  float remTime = 0;
-  float yaw = 0;
+  //float yaw = 0;
 
   while(1) {
 
-    vTaskDelay(M2T(50));
-    if(state == moving) sendPacket(checkIfInRange);
-    vTaskDelay(M2T(50));
+    vTaskDelay(M2T(100));
 
     uint8_t positioningInit = paramGetUint(idPositioningDeck);
     uint8_t multirangerInit = paramGetUint(idMultiranger);
     uint16_t my_up = logGetUint(idUp);
-    float timeNow = usecTimestamp() / 1e6;
+    uint16_t my_front = logGetUint(idFront);
+    //float timeNow = usecTimestamp() / 1e6;
     /*float YawEstimate = logGetFloat(idYaw);*/
-
+    XEstimate = logGetFloat(idX) + initialPos[0];
+    YEstimate = logGetFloat(idY) + initialPos[1];
+    float currPos[] = {XEstimate, YEstimate};
 
     if(!positioningInit){
       DEBUG_PRINT("\nFlow deck not connected\n");
@@ -308,99 +268,65 @@ void appMain()
         state = lowUnlock;
 
       }
-      if((lostConnectionBefore == true || timeNow - timeOfLastMsg >= MAX_TIME_BEFORE_OUT_OF_RANGE) && FIRSTMsg == true && NumOfRecievedWayPoints > 0){
-        if(timeNow - timeOfLastMsg >= MAX_TIME_BEFORE_OUT_OF_RANGE) DEBUG_PRINT("now starting to follow the other drone because of timeout\n");
-        state = GetToLastKnownPos;
-        lostConnectionBefore = true;
-        setHoverSetpoint(&setpoint, 0.0f, 0.0f, HEIGHT, 0.0f,false);
-        commanderSetSetpoint(&setpoint, 3);
+      if(lostConnectionBefore == true && FIRSTMsg == true && recievedWayPoints[0] != 0.0f){
+        state = unlockedFollower;
       }
     }else if(state == lowUnlock){
       if(my_up >= unlockHigh){
-        DEBUG_PRINT("flying!\n");
+        DEBUG_PRINT("starting to fly!\n");
         state = unlocked;
       }
     }else if (state == unlocked){
-      setHoverSetpoint(&setpoint, 0.0f, 0.0f, HEIGHT, 0.0f,false);
-      commanderSetSetpoint(&setpoint, 3);
+      MoveMainDrone(state, currPos, wayPoints, currentWayPoint);
       //vTaskDelay(M2T(500));
       sendPacket(starting);
       DEBUG_PRINT("Hovering!, now moving to first waypoint\n");
       state = moving;
 
+    }else if (state == unlockedFollower){
+      MoveFollowerDrone(state, currPos, recievedWayPoints,my_front);
+      DEBUG_PRINT("Hovering!, now moving to first waypoint\n");
+      state = following;
+
     }else if(state == moving){
-      
       if (my_up <= unlockLow){
         DEBUG_PRINT("ending...\n");
         state = end;
         continue;
       }
-      XEstimate = logGetFloat(idX) + initialPos[0];
-      YEstimate = logGetFloat(idY) + initialPos[1];
-      float Xvel, Yvel;
-      calculateVelToGoal(XEstimate,YEstimate,wayPoints[currentWayPoint][0],wayPoints[currentWayPoint][1],&Xvel,&Yvel);
-      //yaw = calculateYaw(wayPoints[currentWayPoint][0], wayPoints[currentWayPoint][1], XEstimate, YEstimate);
-      float timeNow = usecTimestamp() / 1e6;
-      if (remTime == 0.0f){
-        remTime = timeNow;
-      }
-      setHoverSetpoint(&setpoint, Xvel, Yvel, HEIGHT, yaw, false);
-      commanderSetSetpoint(&setpoint, 3);
-      if (DIST((XEstimate-wayPoints[currentWayPoint][0]),(YEstimate-wayPoints[currentWayPoint][1])) > ACCEPTABLE_RADIUS_FROM_WAYPOINT){ continue;}
-      remTime = timeNow;
-      //if(DIST((XEstimate-wayPoints[currentWayPoint][0]),(YEstimate-wayPoints[currentWayPoint][1])) > ACCEPTABLE_RADIUS_FROM_WAYPOINT) {continue;}
-      currentWayPoint++;
+      MoveMainDrone(state, currPos, wayPoints, currentWayPoint);
       sendLocPacket(XEstimate, YEstimate, HEIGHT);
+      //yaw = calculateYaw(wayPoints[currentWayPoint][0], wayPoints[currentWayPoint][1], XEstimate, YEstimate);
+
+      if (DIST((XEstimate-wayPoints[currentWayPoint][0]),(YEstimate-wayPoints[currentWayPoint][1])) > ACCEPTABLE_RADIUS_FROM_WAYPOINT){ continue;}
+      currentWayPoint++;
+     
       if(currentWayPoint >= NUM_OF_WAYPOINTS){
         state = end;
       }
 
     }else if(state == end){
-      DEBUG_PRINT("landing\n");
-      setHoverSetpoint(&setpoint, 0.0f, 0.0f, HEIGHT/2, 0.0f, false);
-      commanderSetSetpoint(&setpoint, 3);
-      vTaskDelay(M2T(200));
-      memset(&setpoint, 0, sizeof(setpoint_t));
-      commanderSetSetpoint(&setpoint, 5);
-      vTaskDelay(M2T(1000));
-      state = idle;
-      break;
+      MoveMainDrone(state, currPos, wayPoints, currentWayPoint);
+      sendLocPacket(XEstimate,YEstimate,0.0f);
 
-    }else if(state == GetToLastKnownPos){
-      if(currentRecievedWayPoint >= NumOfRecievedWayPoints){
-        state = hover;
-        continue;
-      }
+    }else if(state == following){
       if (my_up <= unlockLow){
         DEBUG_PRINT("ending...\n");
         state = end;
         continue;
       }
-      XEstimate = logGetFloat(idX) + initialPos[0];
-      YEstimate = logGetFloat(idY) + initialPos[1];
-      float Xvel, Yvel;
-      calculateVelToGoal(XEstimate,YEstimate,recievedWayPoints[currentRecievedWayPoint][0],recievedWayPoints[currentRecievedWayPoint][1],&Xvel,&Yvel);
-      float timeNow = usecTimestamp() / 1e6;
-      if (remTime == 0.0f){
-        remTime = timeNow;
-      }
-      setHoverSetpoint(&setpoint, Xvel, Yvel, HEIGHT, 0.0f, false);
-      commanderSetSetpoint(&setpoint, 3);
-      if (DIST((XEstimate-recievedWayPoints[currentRecievedWayPoint][0]),(YEstimate-recievedWayPoints[currentRecievedWayPoint][1])) > ACCEPTABLE_RADIUS_FROM_WAYPOINT){ continue;}
-      remTime = timeNow;
-      //if(DIST((XEstimate-wayPoints[currentWayPoint][0]),(YEstimate-wayPoints[currentWayPoint][1])) > ACCEPTABLE_RADIUS_FROM_WAYPOINT) {continue;}
-      currentRecievedWayPoint++;
+      MoveFollowerDrone(state, currPos, recievedWayPoints, my_front);
+
+      if (DIST((XEstimate-recievedWayPoints[0]),(YEstimate-recievedWayPoints[1])) > ACCEPTABLE_RADIUS_FROM_WAYPOINT){ continue;}
+      state = hover;
+      
 
     }else if(state == hover){
       DEBUG_PRINT("hovering\n");
       if (my_up <= unlockLow){
-        DEBUG_PRINT("ending...\n");
-        memset(&setpoint, 0, sizeof(setpoint_t));
-        commanderSetSetpoint(&setpoint, 3);
-        break;
+        state = end;
       }
-      setHoverSetpoint(&setpoint, 0, 0, HEIGHT, 0.0f, false);
-      commanderSetSetpoint(&setpoint, 3);
+      MoveFollowerDrone(state, currPos, recievedWayPoints, my_front);
     }
 
   }
